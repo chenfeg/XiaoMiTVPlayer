@@ -254,15 +254,6 @@ class SubtitleController(
         return FetchResult.Applied(cues.size)
     }
 
-    /**
-     * 字幕开关键（KEYCODE_CAPTIONS）：返回切换后是否可见，提示文案由按键层组织。
-     */
-    fun toggleVisible(): Boolean {
-        view.visibility =
-            if (view.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        return view.visibility == View.VISIBLE
-    }
-
     companion object {
         /** 自动加载最多试几条在线候选（每条都要下载 + 解析 + 验语言） */
         private const val MAX_ONLINE_TRIES = 3

@@ -41,7 +41,7 @@
     <string name="player_key_forward">快进</string>
 
     <string name="subtitle_search_title">在线中文字幕</string>
-    <string name="subtitle_panel_hint">OK 下载并应用 · 菜单键关闭（播放不中断）</string>
+    <string name="subtitle_panel_hint">首行切换显隐 · OK 下载应用 · 菜单键关闭</string>
     <string name="subtitle_panel_searching">正在向各字幕源查询…</string>
     <string name="subtitle_panel_status">各源返回：%1$s｜候选 %2$d 条</string>
     <string name="subtitle_panel_failed">搜索没有结果：检查设置里的 assrt Token / OpenSubtitles API key，以及电视能否联网</string>
@@ -52,6 +52,8 @@
     <string name="subtitle_source_opensub">OpenSubtitles</string>
     <string name="subtitle_source_fakesub">FakeSub(文件指纹)</string>
     <string name="subtitle_row_caption">%1$s · 匹配分 %2$d</string>
+    <string name="subtitle_toggle_on">隐藏字幕</string>
+    <string name="subtitle_toggle_off">显示字幕</string>
 
     <string name="settings_title">设置</string>
     <string name="settings_save">保存</string>

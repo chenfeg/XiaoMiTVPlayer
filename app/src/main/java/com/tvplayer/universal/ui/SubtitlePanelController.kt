@@ -1,9 +1,12 @@
 package com.tvplayer.universal.ui
 
 import android.content.Context
+import android.graphics.Color
+import android.view.Gravity
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
+import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.tvplayer.universal.R
 import com.tvplayer.universal.databinding.ItemSubtitleBinding
@@ -31,6 +34,8 @@ class SubtitlePanelController(
     private val videoName: String,
     private val search: suspend () -> com.tvplayer.universal.subtitle.SubtitleMatcher.Report?,
     private val fetch: suspend (SubCandidate) -> FetchResult,
+    /** 面板内切换字幕显隐时回调，Activity 用来弹 OSD 提示 */
+    private val onToggleVisibility: (Boolean) -> Unit,
     /** 面板打开：按键层复位"主动进控制条"标记 */
     private val onOpened: () -> Unit = {},
     /** 面板关闭：摘掉面板列表焦点并复位 barFocused（实现里调 parkFocus） */
@@ -44,6 +49,21 @@ class SubtitlePanelController(
 
     /** 面板内（含列表各行）是否持有着焦点；false 说明焦点被 park 到了根布局 */
     val hasFocus: Boolean get() = panel.root.hasFocus()
+
+    private fun toggleLabel(): String =
+        context.getString(
+            if (isSubtitleVisible()) R.string.subtitle_toggle_on
+            else R.string.subtitle_toggle_off
+        )
+
+    private fun isSubtitleVisible(): Boolean =
+        subtitleView?.visibility == View.VISIBLE
+
+    private var subtitleView: SubtitleView? = null
+
+    fun setSubtitleView(view: SubtitleView) {
+        subtitleView = view
+    }
 
     fun toggle() {
         if (isOpen) close() else open()
@@ -91,25 +111,63 @@ class SubtitlePanelController(
         }, 16)
     }
 
-    private val adapter = object : RecyclerView.Adapter<PanelRow>() {
-        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int) =
-            PanelRow(
+    private val adapter = object : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
+        override fun getItemViewType(position: Int) =
+            if (position == 0) TYPE_TOGGLE else TYPE_ROW
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
+            if (viewType == TYPE_TOGGLE) {
+                val tv = TextView(parent.context).apply {
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        parent.context.resources.getDimensionPixelSize(R.dimen.row_height)
+                    )
+                    setBackgroundResource(R.drawable.bg_item_focus)
+                    isClickable = true
+                    isFocusable = true
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(48, 0, 48, 0)
+                    setTextColor(Color.WHITE)
+                    textSize = 18f
+                }
+                return object : RecyclerView.ViewHolder(tv) {}
+            }
+            return PanelRow(
                 ItemSubtitleBinding.inflate(
                     LayoutInflater.from(parent.context), parent, false
                 )
             )
+        }
 
-        override fun getItemCount() = rows.size
+        override fun getItemCount() = 1 + rows.size
 
-        override fun onBindViewHolder(h: PanelRow, position: Int) {
-            val (c, score) = rows[position]
-            h.b.name.text = c.title
-            h.b.caption.text = context.getString(
+        override fun onBindViewHolder(h: RecyclerView.ViewHolder, position: Int) {
+            if (position == 0) {
+                val tv = h.itemView as TextView
+                tv.text = toggleLabel()
+                tv.setOnClickListener {
+                    val nowVisible = isSubtitleVisible()
+                    val newVisible = !nowVisible
+                    subtitleView?.visibility =
+                        if (newVisible) View.VISIBLE else View.GONE
+                    onToggleVisibility(newVisible)
+                    tv.text = if (newVisible)
+                        context.getString(R.string.subtitle_toggle_on)
+                    else
+                        context.getString(R.string.subtitle_toggle_off)
+                }
+                return
+            }
+            val row = position - 1
+            val (c, score) = rows[row]
+            val b = (h as PanelRow).b
+            b.name.text = c.title
+            b.caption.text = context.getString(
                 R.string.subtitle_row_caption, sourceLabel(c.sourceId), score
             )
-            h.b.root.setOnClickListener {
+            b.root.setOnClickListener {
                 val i = h.bindingAdapterPosition
-                if (i != RecyclerView.NO_POSITION) pick(i)
+                if (i != RecyclerView.NO_POSITION) pick(i - 1)
             }
         }
     }
@@ -136,7 +194,7 @@ class SubtitlePanelController(
                 panel.searchStatus.text = context.getString(
                     R.string.subtitle_panel_status, report.counts, report.ranked.size
                 )
-                focusRow(0)
+                focusRow(1)
             }
         }
     }
@@ -155,7 +213,7 @@ class SubtitlePanelController(
                             R.string.subtitle_panel_applied, candidate.title, result.cueCount
                         )
                         // 下载是异步的，期间焦点可能已被摘走，把焦点送回所按行，上下键才不会失灵
-                        focusRow(index)
+                        focusRow(index + 1)
                     }
                     is FetchResult.Failed -> panel.searchStatus.text = context.getString(
                         R.string.subtitle_panel_failed_reason, result.reasonLabel
@@ -169,5 +227,10 @@ class SubtitlePanelController(
         "assrt" -> context.getString(R.string.subtitle_source_assrt)
         "opensub" -> context.getString(R.string.subtitle_source_opensub)
         else -> context.getString(R.string.subtitle_source_fakesub)
+    }
+
+    companion object {
+        private const val TYPE_TOGGLE = 0
+        private const val TYPE_ROW = 1
     }
 }

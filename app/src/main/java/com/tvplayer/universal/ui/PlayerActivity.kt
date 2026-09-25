@@ -179,12 +179,21 @@ class PlayerActivity : AppCompatActivity() {
             videoName = name,
             search = { subtitles.searchReport() },
             fetch = { subtitles.fetchAndApply(it) },
+            onToggleVisibility = { visible ->
+                showOsd(
+                    getString(
+                        if (visible) R.string.player_subs_on
+                        else R.string.player_subs_off
+                    )
+                )
+            },
             onOpened = { barFocused = false },
             onClosed = {
                 parkFocus()
                 barFocused = false
             }
         )
+        panel.setSubtitleView(b.subtitles)
 
         b.btnPlay.setOnClickListener { togglePlay() }
         b.btnBack.setOnClickListener { skipBy(-SKIP_MS) }
@@ -439,16 +448,6 @@ class PlayerActivity : AppCompatActivity() {
             }
             KeyEvent.KEYCODE_MENU -> {
                 panel.toggle()
-                return true
-            }
-            KeyEvent.KEYCODE_CAPTIONS -> {
-                val visible = subtitles.toggleVisible()
-                showOsd(
-                    getString(
-                        if (visible) R.string.player_subs_on
-                        else R.string.player_subs_off
-                    )
-                )
                 return true
             }
             KeyEvent.KEYCODE_MEDIA_AUDIO_TRACK -> {
