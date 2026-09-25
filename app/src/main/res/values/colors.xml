@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF101418</color>
+    <color name="bg_card">#FF1B2128</color>
+    <color name="accent">#FF26C6DA</color>
+    <color name="text_primary">#FFF2F4F6</color>
+    <color name="text_secondary">#FF9AA5B1</color>
+    <color name="osd_scrim">#B3000000</color>
+    <color name="subtitle_text">#FFFFFFFF</color>
+    <color name="subtitle_outline">#E6000000</color>
+    <color name="focus_frame">#FF26C6DA</color>
+</resources>

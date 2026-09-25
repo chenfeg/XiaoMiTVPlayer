@@ -1,0 +1,14 @@
+# 自编译 ijkplayer 内核用的最小 Linux 工具链镜像。
+# NDK 不装在镜像里：它在 ijk-docker-build.sh 里下到 Windows 侧的 ijk-dl/ 缓存，
+# 再解到容器自己的 ext4 上 —— 镜像保持小，重跑构建不用重新下 1GB。
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential \
+      pkg-config autoconf automake libtool \
+      yasm nasm \
+      git curl ca-certificates unzip file \
+      python2 python-is-python2 \
+      zlib1g-dev bzip2 xz-utils \
+    && rm -rf /var/lib/apt/lists/*

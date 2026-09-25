@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 根布局自己要可聚焦，给焦点一个不落在那三个按钮上的落点：ViewGroup 默认
+     FOCUS_BEFORE_DESCENDANTS（先试自己再给子 View），窗口起来时没人主动要焦点，
+     就会给到"第一个可聚焦的后代"——正好是 btnBack，看着就像凭空被选中了。 -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    android:focusable="true">
+
+    <SurfaceView
+        android:id="@+id/surface"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center" />
+
+    <com.tvplayer.universal.ui.SubtitleView
+        android:id="@+id/subtitles"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <!--
+        播放控制条。跟 @id/osd 同生同灭（PlayerActivity.showOsd/hideOsd）：
+        没有操作 6 秒一起收起，按任意键再唤出。
+        初始 invisible 而不是 gone —— osd 留了 72dp 下边距就是给这条让位的，
+        收起时位置不该跳。
+        左右方向键始终是快退/快进，不走焦点，所以这三个按钮不是唯一入口。
+    -->
+    <LinearLayout
+        android:id="@+id/controls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@color/osd_scrim"
+        android:gravity="center_horizontal"
+        android:orientation="horizontal"
+        android:paddingTop="6dp"
+        android:paddingBottom="10dp"
+        android:visibility="invisible">
+
+        <ImageButton
+            android:id="@+id/btnBack"
+            android:layout_width="72dp"
+            android:layout_height="56dp"
+            android:background="@drawable/bg_control_button"
+            android:contentDescription="@string/player_key_back"
+            android:focusable="true"
+            android:src="@drawable/ic_backward" />
+
+        <ImageButton
+            android:id="@+id/btnPlay"
+            android:layout_width="72dp"
+            android:layout_height="56dp"
+            android:layout_marginStart="12dp"
+            android:layout_marginEnd="12dp"
+            android:background="@drawable/bg_control_button"
+            android:contentDescription="@string/player_key_play_pause"
+            android:focusable="true"
+            android:src="@drawable/ic_play" />
+
+        <ImageButton
+            android:id="@+id/btnForward"
+            android:layout_width="72dp"
+            android:layout_height="56dp"
+            android:background="@drawable/bg_control_button"
+            android:contentDescription="@string/player_key_forward"
+            android:focusable="true"
+            android:src="@drawable/ic_forward" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/osd"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:layout_marginBottom="72dp"
+        android:background="@color/osd_scrim"
+        android:orientation="vertical"
+        android:padding="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/osdTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:ellipsize="middle"
+            android:singleLine="true"
+            android:textColor="@color/text_primary"
+            android:textSize="@dimen/text_body" />
+
+        <ProgressBar
+            android:id="@+id/osdProgress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:progressTint="@color/accent" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/osdTime"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:textColor="@color/text_secondary"
+                android:textSize="@dimen/text_caption" />
+
+            <TextView
+                android:id="@+id/osdHint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:textColor="@color/text_secondary"
+                android:textSize="@dimen/text_caption" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!--
+        字幕搜索面板：盖在画面上，不放独立 Activity。默认隐藏，菜单键开关。
+        做成独立界面会让 SurfaceView 的 surface 被销毁、返回键落点也不受控，
+        用户反馈的"进得去字幕搜索却回不到播放页"就是那个结构造成的。
+    -->
+    <include
+        android:id="@+id/searchPanel"
+        layout="@layout/panel_subtitle_search"
+        android:visibility="gone" />
+</FrameLayout>

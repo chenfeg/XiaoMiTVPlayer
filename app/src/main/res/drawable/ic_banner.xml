@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Leanback 桌面 banner：320x180 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path
+        android:fillColor="#101418"
+        android:pathData="M0,0h320v180h-320z" />
+    <path
+        android:fillColor="#26C6DA"
+        android:pathData="M132,58l56,32l-56,32z" />
+    <path
+        android:fillColor="#F2F4F6"
+        android:pathData="M40,148h240v8h-240z" />
+    <path
+        android:strokeColor="#39424C"
+        android:strokeWidth="4"
+        android:pathData="M18,18h284v144h-284z" />
+</vector>

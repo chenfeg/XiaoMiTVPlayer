@@ -1,0 +1,15 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+# 本地签名密钥与口令：只存在于这台机器，换机器自己重新生成
+keystore/
+# 构建日志与 IDE/编辑器
+.vscode/
+*.log
+vibe_images/

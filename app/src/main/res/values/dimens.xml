@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- TV 上 sp 与 dp 等效（系统字体缩放关闭），统一按 1080p 栅格设计，4K 由系统 scaling 放大 -->
+    <dimen name="page_padding">48dp</dimen>
+    <dimen name="row_height">64dp</dimen>
+    <dimen name="list_item_gap">8dp</dimen>
+    <dimen name="osd_height">160dp</dimen>
+    <dimen name="text_title">22sp</dimen>
+    <dimen name="text_body">18sp</dimen>
+    <dimen name="text_caption">14sp</dimen>
+</resources>

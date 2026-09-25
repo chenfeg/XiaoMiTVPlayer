@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">万能播放器</string>
+
+    <string name="source_local">本机存储</string>
+    <string name="source_none">未发现可浏览的存储设备</string>
+    <string name="browse_error">读取失败：%1$s</string>
+    <string name="browse_empty_dir">这个目录里没有视频/字幕文件</string>
+    <string name="smb_need_share">SMB 填了地址但没填共享名：共享列表无法自动枚举，请在设置里填写共享名</string>
+
+    <string name="menu_settings">设置</string>
+    <string name="main_hint">方向键选择 · OK 打开 · 菜单键进入设置</string>
+    <string name="menu_subtitle_search">搜索字幕</string>
+
+    <string name="player_no_url">无法打开该文件</string>
+    <string name="player_hw_fallback">硬解失败，已切换软解重试</string>
+    <string name="player_error_io">数据读取中断（网络或文件读不动了），不是解码问题：换软解没用，先看网络/共享存储是否稳定</string>
+    <string name="player_still_preparing">已等待 20 秒仍未就绪：还卡在读取/探测阶段，不是解码问题。设置页「运行日志」已记下源信息和原生日志</string>
+    <string name="player_error">播放出错：%1$s</string>
+    <string name="player_failed">播放失败</string>
+    <string name="player_error_soft_failed">硬解和软解都失败，见设置页运行日志的错误码</string>
+    <string name="player_error_soft_unsupported">硬解失败；本机软解能力不支持 %1$d×%2$d，不重试（换完整版内核或降分辨率）</string>
+    <string name="player_subtitle_found">已加载字幕：%1$s</string>
+    <string name="player_subtitle_loading">正在搜索中文字幕…</string>
+    <!-- 三个源各自返回几条 + 最高分都贴到屏上：光说"没找到"分不清是没网、没配 key 还是分数不够 -->
+    <string name="player_subtitle_none_reason">在线没有够格的中文字幕\n各源返回：%1$s｜最高分 %2$d（要 ≥%3$d 才自动加载）\n按菜单键可人工挑一条</string>
+    <string name="player_subtitle_local_only_reason">在线没有够格的中文字幕，现在显示的是本地字幕\n各源返回：%1$s｜最高分 %2$d（要 ≥%3$d）</string>
+    <string name="player_subtitle_not_chinese">在线候选的正文都不是中文\n现在显示的是：%1$s\n按菜单键可人工挑一条</string>
+    <string name="player_subtitle_error">在线字幕搜索出错：%1$s</string>
+    <string name="player_subtitle_fetch_failed">字幕下载出错：%1$s</string>
+    <string name="player_audio_track">音轨 %1$d/%2$d</string>
+    <string name="player_audio_single">这个文件只有一条音轨</string>
+    <string name="player_speed">倍速 %1$s×</string>
+    <string name="player_subtitle_off">字幕已关闭</string>
+    <string name="player_paused">已暂停</string>
+    <string name="player_playing">播放中</string>
+    <string name="player_subs_on">字幕：显示</string>
+    <string name="player_subs_off">字幕：隐藏</string>
+    <string name="player_key_play_pause">播放/暂停</string>
+    <string name="player_key_back">快退</string>
+    <string name="player_key_forward">快进</string>
+
+    <string name="subtitle_search_title">在线中文字幕</string>
+    <string name="subtitle_panel_hint">OK 下载并应用 · 菜单键关闭（播放不中断）</string>
+    <string name="subtitle_panel_searching">正在向各字幕源查询…</string>
+    <string name="subtitle_panel_status">各源返回：%1$s｜候选 %2$d 条</string>
+    <string name="subtitle_panel_failed">搜索没有结果：检查设置里的 assrt Token / OpenSubtitles API key，以及电视能否联网</string>
+    <string name="subtitle_panel_failed_reason">%1$s（详见设置页运行日志）</string>
+    <string name="subtitle_panel_fetching">正在下载 %1$s…</string>
+    <string name="subtitle_panel_applied">已应用：%1$s（%2$d 条 · 再按菜单键关闭面板）</string>
+    <string name="subtitle_source_assrt">射手(AssSub)</string>
+    <string name="subtitle_source_opensub">OpenSubtitles</string>
+    <string name="subtitle_source_fakesub">FakeSub(文件指纹)</string>
+    <string name="subtitle_row_caption">%1$s · 匹配分 %2$d</string>
+
+    <string name="settings_title">设置</string>
+    <string name="settings_save">保存</string>
+    <string name="settings_fakesub_base">FakeSub 实例地址（公共实例已失效，自建才填）</string>
+    <string name="settings_opensub_key">OpenSubtitles API key（免费申请，留空则不启用）</string>
+    <string name="settings_opensub_user">OpenSubtitles 账号（下载字幕要用）</string>
+    <string name="settings_opensub_pass">OpenSubtitles 密码</string>
+    <string name="settings_opensub_base">OpenSubtitles 接口地址</string>
+    <string name="settings_assrt_token">assrt Token（已内置）</string>
+    <string name="settings_assrt_base">assrt 接口地址</string>
+    <string name="settings_auto_subtitle">非中文内容自动加载中文字幕</string>
+    <string name="settings_subtitle_size">字幕大小（屏高百分比）</string>
+    <string name="settings_subtitle_delay">字幕延迟（毫秒）</string>
+    <string name="settings_smb_host">SMB 服务器 IP</string>
+    <string name="settings_smb_share">SMB 共享名</string>
+    <string name="settings_smb_user">SMB 用户名</string>
+    <string name="settings_smb_pass">SMB 密码</string>
+    <string name="settings_cache_clear">清理字幕缓存</string>
+    <string name="settings_probe">存储探测</string>
+    <string name="settings_log">运行日志</string>
+    <string name="settings_probe_running">正在读取挂载信息…</string>
+    <string name="settings_audio_opensles">音频改用 OpenSL ES 输出（播放没声音时勾上再存）</string>
+    <string name="settings_beep">声音自检</string>
+    <string name="settings_beep_hint">应连响 3 声：听得到就说明电视输出正常，问题在播放器；听不到先去电视声音设置里把数字输出改成 PCM</string>
+    <string name="settings_cache_cleared">已清理字幕缓存</string>
+    <string name="settings_saved">已保存</string>
+
+    <string name="fmt_up_dir">..（上级目录）</string>
+    <string name="fmt_folder">目录</string>
+    <string name="fmt_empty_dir">空目录</string>
+</resources>
