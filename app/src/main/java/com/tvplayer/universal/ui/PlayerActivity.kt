@@ -60,6 +60,18 @@ class PlayerActivity : AppCompatActivity() {
     private var prepared = false
     private var nativeLogDumped = false
     private var tickJob: Job? = null
+
+    /** 标记 onPause 是否由手动休眠触发（区别于用户主动退出），onResume 据此恢复 */
+    @Volatile private var pausedBySleep = false
+
+    /** 播放存活看门狗：监测"应当播放却长时间没有帧推进"的卡死，触发自动恢复 */
+    private var livenessJob: Job? = null
+    @Volatile private var recovering = false
+    /** 用户主动 seek 期间给看门狗的豁免截止时间（uptimeMillis），防止把 seek 误判成卡死 */
+    @Volatile private var seekGraceUntil = 0L
+    /** 已因卡死自动恢复过的次数，避免无限重建 */
+    @Volatile private var autoRecovered = 0
+
     private val osdHandler = Handler(Looper.getMainLooper())
 
     /** OSD + 控制条显隐与自动收起，onCreate 里接线（见 OsdController） */
@@ -73,8 +85,9 @@ class PlayerActivity : AppCompatActivity() {
         SeekController(
             scheduler = HandlerScheduler(osdHandler),
             clock = Clock { SystemClock.uptimeMillis() },
-            currentPosition = { engine.currentPosition },
-            duration = { engine.duration },
+            // commit 在 Handler 线程执行：只能读 tick 刷新的缓存，不能调可能挂起的 native
+            currentPosition = { engine.cachedPosition },
+            duration = { engine.cachedDuration },
             seekTo = { engine.seekTo(it) },
             sourceTag = { sourceTag() },
             log = { EventLog.line(it) }
@@ -131,6 +144,10 @@ class PlayerActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         b = ActivityPlayerBinding.inflate(layoutInflater)
         setContentView(b.root)
+        // 播放时保持屏幕唤醒：电视默认 30 分钟休眠，休眠会挂起网络（SMB 断流）
+        // 导致 ijk 读线程永久阻塞、mediacodec 死持、整机冻结（2026-09-27 事故根因）。
+        // FLAG_KEEP_SCREEN_ON 只防自动休眠，用户按电源键仍可正常关屏。
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = Prefs(this)
 
         osd = OsdController(
@@ -138,7 +155,7 @@ class PlayerActivity : AppCompatActivity() {
             controls = b.controls,
             hintView = b.osdHint,
             handler = osdHandler,
-            isPlaying = { engine.isPlaying },
+            isPlaying = { engine.isPlayingState },
             onShown = { updatePlayIcon() },
             onHide = {
                 // 隐藏时把焦点从控制条上摘掉：焦点留在看不见的按钮上的话，
@@ -202,7 +219,14 @@ class PlayerActivity : AppCompatActivity() {
         b.surface.holder.addCallback(object : SurfaceHolder.Callback {
             override fun surfaceCreated(holder: SurfaceHolder) {
                 surfaceReady = true
-                maybeStart()
+                if (started && !destroyed) {
+                    // 休眠唤醒：surface 重建，但旧引擎的 SMB 连接已死，必须整链重建
+                    EventLog.line("surface 重建（休眠唤醒），从 ${engine.cachedPosition / 1000}s 断点恢复")
+                    val pos = engine.cachedPosition
+                    lifecycleScope.launch { recoverFromStall(pos) }
+                } else {
+                    maybeStart()
+                }
             }
 
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, ht: Int) {}
@@ -215,11 +239,19 @@ class PlayerActivity : AppCompatActivity() {
             override fun onPrepared(durationMs: Long) {
                 if (destroyed) return
                 prepared = true
+                engine.markPlaying()
                 osdHandler.removeCallbacks(prepareWatchdog)
                 EventLog.line("已就绪 时长=${durationMs / 1000}s ${engine.videoInfo()}")
                 b.osdProgress.max = durationMs.toInt().coerceAtLeast(1)
                 showOsd(null)
                 startTick()
+                startLivenessWatchdog()
+                // 卡死恢复的重建：就绪后先跳回断点再播
+                val resume = resumeAtMs
+                if (resume > 0) {
+                    resumeAtMs = -1L
+                    engine.seekTo(resume)
+                }
                 subtitles.autoLoad()
                 checkAudioPath()
             }
@@ -244,6 +276,7 @@ class PlayerActivity : AppCompatActivity() {
 
             override fun onCompleted() {
                 if (destroyed) return
+                engine.markStopped()
                 EventLog.line("播放结束")
                 showOsd(null)
             }
@@ -253,9 +286,8 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     /**
-     * 出错后的岔路：读取中断不重试（换解码器改不了数据源），能软解的才重试软解，
-     * 超能力的直接报出来。4K 在 Cortex-A17+2GB 上软解不是"卡"而是必然分配不出内存/
-     * 崩溃，重试等于再崩一次。
+     * 出错后的岔路：读取中断（网络/SMB 断流）也尝试断点自动恢复——换解码器改不了数据源，
+     * 但重建连接可以。软解重试只留给真正的解码失败。
      */
     private fun retryOrReport(detail: String, ioError: Boolean) {
         if (destroyed || !surfaceReady) {
@@ -263,8 +295,10 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         if (ioError) {
-            EventLog.line("读取中断，不重试 $detail")
-            showOsdPermanent("${getString(R.string.player_error_io)}\n$detail")
+            // SMB 网络断流：位置还在，尝试从断点重建数据源恢复播放
+            val pos = engine.cachedPosition
+            EventLog.line("读取中断，尝试从 ${pos / 1000}s 断点自动恢复 $detail")
+            lifecycleScope.launch { recoverFromStall(pos) }
             return
         }
         val size = engine.videoSize()
@@ -322,9 +356,14 @@ class PlayerActivity : AppCompatActivity() {
             }
             playbackUrl = url
             EventLog.line("打开 硬解=1 源=${sourceTag()}")
-            armPrepareWatchdog()
-            engine.open(b.surface.holder, url, hw = true)
+            openEngine(url, hw = true)
         }
+    }
+
+    /** 装弹 prepare 看门狗并让引擎在当前 surface 上打开（初次起播与卡死恢复共用） */
+    private fun openEngine(url: String, hw: Boolean) {
+        armPrepareWatchdog()
+        engine.open(b.surface.holder, url, hw = hw)
     }
 
     private suspend fun resolveUrl(): String = when {
@@ -342,17 +381,26 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun startTick() {
         tickJob?.cancel()
-        tickJob = lifecycleScope.launch {
+        // 整个循环跑在 IO：snapshot() 的 native 访问即使挂起也只冻这一个协程，不影响主线程按键。
+        tickJob = lifecycleScope.launch(Dispatchers.IO) {
             while (isActive) {
-                val pos = engine.currentPosition
-                b.subtitles.updatePosition(pos)
-                // 字幕永远跟着真实播放走；进度条和时间却在 seek 落定前显示目标位置，
-                // 否则连按快进时数字会跳回去（用户反馈的"显示的时间点回退"）。
-                val shown = seek.onTick(pos)
-                if (b.osd.visibility == android.view.View.VISIBLE && !b.osdProgress.isInTouchMode) {
-                    b.osdProgress.progress = shown.toInt()
-                    b.osdTime.text = fmt(shown) + " / " + fmt(engine.duration)
-                    updatePlayIcon()
+                val snap = engine.snapshot()
+                if (snap != null) {
+                    // View 与 SeekController 状态机都切回主线程更新
+                    withContext(Dispatchers.Main) {
+                        if (destroyed) return@withContext
+                        b.subtitles.updatePosition(snap.positionMs)
+                        // 字幕永远跟着真实播放走；进度条和时间却在 seek 落定前显示目标位置，
+                        // 否则连按快进时数字会跳回去（用户反馈的"显示的时间点回退"）。
+                        val shown = seek.onTick(snap.positionMs)
+                        if (b.osd.visibility == android.view.View.VISIBLE &&
+                            !b.osdProgress.isInTouchMode
+                        ) {
+                            b.osdProgress.progress = shown.toInt()
+                            b.osdTime.text = fmt(shown) + " / " + fmt(snap.durationMs)
+                            updatePlayIcon()
+                        }
+                    }
                 }
                 delay(200)
             }
@@ -363,6 +411,93 @@ class PlayerActivity : AppCompatActivity() {
     private fun showOsd(hint: String?) = osd.show(hint)
 
     /**
+     * 播放存活看门狗。独立于 tick 跑在 IO：
+     * "应当正在播放、非 seek 豁免期，而快照位置连续 [STALL_LIMIT_MS] 没有推进"
+     * 即判定硬解/读管线挂死（不报 onError 的那一类，2026-09-26 黑屏事故），触发恢复。
+     *
+     * 改进（2026-09-27）：SMB 断流时播放位置可能因音频缓冲微幅推进而"假活"，
+     * 但 HTTP 桥字节数已停止增长。现在同时检测位置和数据流动，任一停滞即判定卡死。
+     */
+    private fun startLivenessWatchdog() {
+        livenessJob?.cancel()
+        livenessJob = lifecycleScope.launch(Dispatchers.IO) {
+            var lastPos = -1L
+            var frozenSince = 0L
+            var lastBytes = -1L
+            while (isActive) {
+                delay(1000)
+                if (destroyed || recovering || !engine.isPlayingState) {
+                    lastPos = -1L; frozenSince = 0L; lastBytes = -1L
+                    continue
+                }
+                if (SystemClock.uptimeMillis() < seekGraceUntil) {
+                    lastPos = -1L; frozenSince = 0L; lastBytes = -1L
+                    continue
+                }
+                val pos = engine.snapshot()?.positionMs ?: continue
+                val bytes = bridge?.bytesSentTotal ?: -1L
+                // 位置推进或数据流动都算活：单一指标有盲区（音频缓冲耗着、或位置在动但数据已断）
+                val positionAlive = pos != lastPos
+                val dataAlive = bytes != lastBytes && bytes >= 0
+                if (positionAlive || dataAlive) {
+                    lastPos = pos; lastBytes = bytes; frozenSince = 0L
+                } else {
+                    val now = SystemClock.uptimeMillis()
+                    if (frozenSince == 0L) frozenSince = now
+                    if (now - frozenSince >= STALL_LIMIT_MS) {
+                        frozenSince = 0L; lastPos = -1L; lastBytes = -1L
+                        recoverFromStall(pos)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * 卡死恢复：关数据源 → 限时释放旧引擎 → 从断点重建。
+     * release 超时（解码器线程挂死）则不再重建，常驻提示用户重启电视——
+     * 那时硬解已被死持，再开播放器也播不了，只能重启 mediaserver。
+     */
+    private suspend fun recoverFromStall(positionMs: Long) {
+        if (recovering || destroyed) return
+        recovering = true
+        EventLog.line("检测到播放卡死：位置 ${positionMs / 1000}s 连续 ${STALL_LIMIT_MS / 1000}s 无推进")
+        osdHandler.post { showOsdPermanent(getString(R.string.player_recovering)) }
+        // 先掐数据源：断掉桥的 socket 和 SMB 读，让旧引擎的读线程能醒
+        bridge?.close()
+        bridge = null
+        val released = engine.releaseWithTimeout(RELEASE_TIMEOUT_MS)
+        if (!released) {
+            EventLog.line("卡死恢复失败：解码器未释放，需重启电视")
+            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+            recovering = false
+            return
+        }
+        if (autoRecovered >= MAX_AUTO_RECOVER) {
+            EventLog.line("已自动恢复 $autoRecovered 次仍卡死，不再重试")
+            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+            recovering = false
+            return
+        }
+        autoRecovered++
+        // 重建数据源（SMB 重新挂桥；本地文件直接用路径）
+        val newUrl = runCatching { resolveUrl() }.getOrElse {
+            EventLog.line("卡死恢复重建数据源失败 ${it.javaClass.simpleName}")
+            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+            recovering = false
+            return
+        }
+        resumeAtMs = positionMs
+        playbackUrl = newUrl
+        EventLog.line("从 ${positionMs / 1000}s 断点自动恢复播放（第 $autoRecovered 次）")
+        osdHandler.post { openEngine(newUrl, hw = engine.hardwareDecode) }
+        recovering = false
+    }
+
+    /** 卡死恢复后在 onPrepared 里 seek 回的断点；-1 = 不 seek */
+    @Volatile private var resumeAtMs = -1L
+
+    /**
      * 图标显示"当前是什么状态"，不是"按下去会干什么"：
      * 暂停中显示暂停符（两条竖线），播放中显示播放符。这是用户指定的口径。
      * 状态可能在 Java 侧看不见的地方变（自动暂停、出错、加载完才真正开跑），
@@ -370,7 +505,8 @@ class PlayerActivity : AppCompatActivity() {
      */
     private var playIconRes = 0
     private fun updatePlayIcon() {
-        val res = if (engine.isPlaying) R.drawable.ic_play else R.drawable.ic_pause
+        // 用缓存的播放状态，不在主线程问 native isPlaying()
+        val res = if (engine.isPlayingState) R.drawable.ic_play else R.drawable.ic_pause
         if (res == playIconRes) return
         playIconRes = res
         b.btnPlay.setImageResource(res)
@@ -383,6 +519,8 @@ class PlayerActivity : AppCompatActivity() {
 
     /** 遥控器方向键 / 屏幕按钮的快退快进：状态机在 [SeekController]，这里顺带唤出 OSD */
     private fun skipBy(deltaMs: Long) {
+        // seek 提交(防抖400ms)+落定(上限15s)期间位置会短暂停顿，给看门狗豁免，别误判成卡死
+        seekGraceUntil = SystemClock.uptimeMillis() + SEEK_GRACE_MS
         seek.skip(deltaMs)
         showOsd(null)
     }
@@ -454,8 +592,13 @@ class PlayerActivity : AppCompatActivity() {
                 cycleAudioTrack(); return true
             }
             KeyEvent.KEYCODE_INFO -> {
-                // 无声/无声轨时用户能自己把音频链路体检调出来看
-                showOsdPermanent(engine.audioReport()); return true
+                // 无声/无声轨时用户能自己把音频链路体检调出来看；audioReport 是 native，放 IO
+                showOsd(getString(R.string.player_audio_querying))
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val report = engine.audioReport()
+                    osdHandler.post { showOsdPermanent(report) }
+                }
+                return true
             }
             KeyEvent.KEYCODE_MEDIA_NEXT -> { skipBy(60_000); return true }
             KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { skipBy(-60_000); return true }
@@ -473,17 +616,20 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     private fun cycleAudioTrack() {
-        val audio = engine.tracks().withIndex()
-            .filter { it.value.trackType == ITrackInfo.MEDIA_TRACK_TYPE_AUDIO }
-            .map { it.index }
-        if (audio.size < 2) {
-            showOsd(getString(R.string.player_audio_single))
-            return
+        // tracks/selectTrack 都是 native：整个切换在 IO 做，主线程只显示结果
+        lifecycleScope.launch(Dispatchers.IO) {
+            val audio = engine.tracks().withIndex()
+                .filter { it.value.trackType == ITrackInfo.MEDIA_TRACK_TYPE_AUDIO }
+                .map { it.index }
+            if (audio.size < 2) {
+                osdHandler.post { showOsd(getString(R.string.player_audio_single)) }
+                return@launch
+            }
+            val current = engine.selectedAudioIndex()
+            val nextPos = (audio.indexOf(current) + 1).coerceAtLeast(0) % audio.size
+            engine.switchAudioTrack(to = audio[nextPos], from = current)
+            osdHandler.post { showOsd(getString(R.string.player_audio_track, nextPos + 1, audio.size)) }
         }
-        val current = engine.selectedAudioIndex()
-        val nextPos = (audio.indexOf(current) + 1).coerceAtLeast(0) % audio.size
-        engine.switchAudioTrack(to = audio[nextPos], from = current)
-        showOsd(getString(R.string.player_audio_track, nextPos + 1, audio.size))
     }
 
     /**
@@ -495,11 +641,14 @@ class PlayerActivity : AppCompatActivity() {
 
     private fun reportAudioPath() {
         if (destroyed) return
-        val report = engine.audioReport()
-        EventLog.line("音频体检 $report")
-        val silent = engine.selectedAudioIndex() < 0 ||
-            engine.player?.audioCachedPackets == 0L
-        if (silent) showOsdPermanent(report)
+        // 音频体检要读 tracks（native）：放 IO，避免在主线程被挂起
+        lifecycleScope.launch(Dispatchers.IO) {
+            val report = engine.audioReport()
+            EventLog.line("音频体检 $report")
+            val silent = engine.selectedAudioIndex() < 0 ||
+                engine.player?.audioCachedPackets == 0L
+            if (silent) osdHandler.post { showOsdPermanent(report) }
+        }
     }
 
     /** 诊断信息不能被自动隐藏掉 */
@@ -534,13 +683,27 @@ class PlayerActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        if (engine.isPlaying) engine.togglePause()
+        pausedBySleep = true
+        // 用缓存状态判断，不读 native
+        if (engine.isPlayingState) engine.togglePause()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!pausedBySleep || destroyed || !started) return
+        pausedBySleep = false
+        // 手动休眠唤醒：surface 可能没重建，但 SMB 连接已被系统挂起，
+        // 旧引擎的读线程已死，必须整链重建才能恢复画面。
+        EventLog.line("休眠唤醒，从 ${engine.cachedPosition / 1000}s 断点恢复")
+        val pos = engine.cachedPosition
+        lifecycleScope.launch { recoverFromStall(pos) }
     }
 
     override fun onDestroy() {
-        EventLog.line("退出播放 位置=${engine.currentPosition / 1000}s")
+        EventLog.line("退出播放 位置=${engine.cachedPosition / 1000}s")
         destroyed = true
         tickJob?.cancel()
+        livenessJob?.cancel()
         // 排队的重试/体检/自动隐藏全部撤掉：留在那儿的就是"退出之后还去开第二台播放器"的入口
         osdHandler.removeCallbacksAndMessages(null)
         // 先关数据源、后放播放器：ijk 的 release 要 join 读线程，读线程可能正卡在
@@ -567,6 +730,18 @@ class PlayerActivity : AppCompatActivity() {
 
         /** 超过这个时间还没收到 onPrepared/onError 就把现场记下来（只记录，不杀播放器） */
         private const val PREPARE_TIMEOUT_MS = 20_000L
+
+        /** 存活看门狗："应当播放却连续多久无位置推进"判定为卡死 */
+        private const val STALL_LIMIT_MS = 10_000L
+
+        /** 卡死恢复时等待旧引擎 release 的上限；超时说明解码器挂死，只能重启电视 */
+        private const val RELEASE_TIMEOUT_MS = 5_000L
+
+        /** 用户 seek 后给看门狗的豁免时长（覆盖提交400ms+落定上限15s） */
+        private const val SEEK_GRACE_MS = 16_000L
+
+        /** 一次播放内最多自动恢复次数，超过则提示重启，避免无限重建 */
+        private const val MAX_AUTO_RECOVER = 2
 
         /** 屏幕上的快进/快退按钮一次跳多少 */
         private const val SKIP_MS = 10_000L

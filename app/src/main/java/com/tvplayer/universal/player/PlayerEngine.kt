@@ -6,6 +6,9 @@ import android.view.SurfaceHolder
 import com.tvplayer.universal.data.EventLog
 import tv.danmaku.ijk.media.player.IjkMediaPlayer
 import tv.danmaku.ijk.media.player.misc.ITrackInfo
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.concurrent.thread
 
 /**
@@ -38,7 +41,25 @@ class PlayerEngine {
     /** 无声时切换音频输出后端：默认走 Java AudioTrack，置真则走 native OpenSL ES */
     var audioOpenSles = false
 
+    /**
+     * 主线程可读的"应当正在播放"缓存，由 open/togglePause/onPrepared 维护，
+     * **不在主线程调 native isPlaying()**——native 挂起时该调用会把主线程一起冻死，
+     * 遥控器所有按键都无响应（2026-09-26 晚 40 分钟黑屏事故的直接原因之一）。
+     */
+    @Volatile
+    var isPlayingState = false
+        private set
+
+    /** onPrepared 回调时标记已进入播放（start-on-prepared=1） */
+    fun markPlaying() { isPlayingState = true }
+
+    /** 播放结束/外部确认停顿时标记（供回调使用） */
+    fun markStopped() { isPlayingState = false }
+
     private var callback: Callback? = null
+
+    /** IO 线程读取的播放位置/时长快照（native 访问只允许发生在 IO 线程） */
+    data class Snapshot(val positionMs: Long, val durationMs: Long)
 
     fun setCallback(cb: Callback) {
         callback = cb
@@ -47,6 +68,7 @@ class PlayerEngine {
     fun open(surface: SurfaceHolder?, path: String, hw: Boolean = hardwareDecode) {
         releaseSync()
         hardwareDecode = hw
+        isPlayingState = false
         val p = IjkMediaPlayer()
         player = p
         try {
@@ -69,6 +91,13 @@ class PlayerEngine {
             p.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "analyzeduration", 8000000)
             p.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "analyzemaxduration", 8000L)
             p.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "protocol_whitelist", "file,http,https,tcp,tls,crypto")
+            // 网络（本地 HTTP 桥→SMB）读写停顿超过这个时间就让 ffmpeg 返回错误而不是永久挂住。
+            // 单位微秒。老 OMX/mediacodec 管线遇到"读线程无限阻塞"会死持解码器、整机都播不了，
+            // 有了读超时才会走到 onError/存活看门狗的恢复路径。仅对 http 源有意义。
+            // ijk 0.8.8 对应 ffmpeg ~3.4：rw_timeout 可能不存在，timeout 是 HTTP 协议级确定存在的。
+            if (path.startsWith("http://") || path.startsWith("https://")) {
+                p.setOption(IjkMediaPlayer.OPT_CATEGORY_FORMAT, "timeout", HTTP_RW_TIMEOUT_US)
+            }
         } catch (e: Exception) {
             Log.w(TAG, "option set failed (old ijk build?)", e)
             EventLog.line("播放器参数设置失败 ${e.javaClass.simpleName}: ${e.message}")
@@ -89,21 +118,41 @@ class PlayerEngine {
         }
     }
 
-    val duration: Long get() = try { player?.duration ?: 0 } catch (e: Exception) { 0 }
-    val currentPosition: Long get() = try { player?.currentPosition ?: 0 } catch (e: Exception) { 0 }
-    val isPlaying: Boolean get() = player?.isPlaying == true
+    /** 最近一次 [snapshot] 缓存的时长/位置，供非 IO 线程（seek 提交回调）安全读取，不碰 native */
+    @Volatile private var cachedDurationMs = 0L
+    @Volatile private var cachedPositionMs = 0L
+
+    /** seek 提交等非 IO 线程读取的最近缓存：绝不直接调 native（防主线程被挂起的 native 冻死） */
+    val cachedDuration: Long get() = cachedDurationMs
+    val cachedPosition: Long get() = cachedPositionMs
+
+    /**
+     * 在 IO 线程读取当前位置/时长。native 访问只允许发生在这里：
+     * 万一 native 已挂起，阻塞的是 IO 协程而非主线程，按键与提示仍能响应。
+     */
+    suspend fun snapshot(): Snapshot? = withContext(Dispatchers.IO) {
+        val p = player ?: return@withContext null
+        val s = Snapshot(
+            try { p.currentPosition } catch (e: Exception) { cachedPositionMs },
+            try { p.duration } catch (e: Exception) { cachedDurationMs }
+        )
+        cachedPositionMs = s.positionMs
+        cachedDurationMs = s.durationMs
+        s
+    }
 
     fun togglePause(): Boolean {
         val p = player ?: return false
-        return if (p.isPlaying) {
-            p.pause(); false
+        // 以缓存的意图状态判断，不调可能挂起的 native isPlaying()
+        return if (isPlayingState) {
+            p.pause(); isPlayingState = false; false
         } else {
-            p.start(); true
+            p.start(); isPlayingState = true; true
         }
     }
 
     fun seekTo(ms: Long) {
-        runCatching { player?.seekTo(ms.coerceIn(0, duration)) }
+        runCatching { player?.seekTo(ms.coerceIn(0, cachedDurationMs)) }
     }
 
     fun setSpeed(speed: Float) {
@@ -175,10 +224,38 @@ class PlayerEngine {
     private fun releaseSync() {
         val p = player ?: return
         player = null
+        isPlayingState = false
+        blockingRelease(p)
+    }
+
+    /** 真正的阻塞式 reset+release（内部不切线程，调用方自己保证不在主线程直接长等） */
+    private fun blockingRelease(p: IjkMediaPlayer) {
+        val t0 = SystemClock.uptimeMillis()
         runCatching {
             p.reset()
             p.release()
         }.onFailure { Log.w(TAG, "release", it) }
+        val cost = SystemClock.uptimeMillis() - t0
+        if (cost > 2000) EventLog.line("播放器 release 用了 ${cost}ms：读线程没及时退出")
+    }
+
+    /**
+     * 存活看门狗专用：在 IO 线程限时释放。
+     * @return true = 已彻底释放（解码器已归还，可安全重建）；false = [timeoutMs] 内没释放完，
+     *         native 读/解码线程大概率已挂死、解码器被死持，此时**不能再重建**，应提示用户重启电视。
+     */
+    suspend fun releaseWithTimeout(timeoutMs: Long): Boolean {
+        val p = player ?: return true
+        player = null
+        isPlayingState = false
+        val done = withTimeoutOrNull(timeoutMs) {
+            withContext(Dispatchers.IO) { blockingRelease(p) }
+        }
+        if (done == null) {
+            EventLog.line("播放器 release ${timeoutMs}ms 未完成：解码器线程挂死，需重启电视")
+            return false
+        }
+        return true
     }
 
     /**
@@ -187,24 +264,19 @@ class PlayerEngine {
      * 那里对读线程和刷帧线程做的是阻塞式 SDL_WaitThread（ff_ffplay.c 里先打一行
      * "wait for read_tid" 再等）。读线程卡在没完没了的阻塞读上时这个 join 永不返回，
      * 放主线程就是整个应用连列表页一起冻住、只能杀进程。
-     * 耗时超过 2 秒写进运行日志：这条记录本身就是"卡在哪个 join"的证据。
      */
     fun release() {
         val p = player ?: return
         player = null
-        thread(name = "ijk-release", isDaemon = true) {
-            val t0 = SystemClock.uptimeMillis()
-            runCatching {
-                p.reset()
-                p.release()
-            }.onFailure { Log.w(TAG, "release", it) }
-            val cost = SystemClock.uptimeMillis() - t0
-            if (cost > 2000) EventLog.line("播放器 release 用了 ${cost}ms：读线程没及时退出")
-        }
+        isPlayingState = false
+        thread(name = "ijk-release", isDaemon = true) { blockingRelease(p) }
     }
 
     companion object {
         private const val TAG = "PlayerEngine"
         private val RES_PATTERN = Regex("""(\d{2,5})\s*x\s*(\d{2,5})""")
+
+        /** ffmpeg 网络读写超时（微秒）= 15 秒：读不动就报错而不是永久挂住 */
+        private const val HTTP_RW_TIMEOUT_US = 15_000_000L
     }
 }

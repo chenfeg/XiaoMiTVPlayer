@@ -17,7 +17,8 @@ object EventLog {
 
     private const val TAG = "EventLog"
     private const val MAX_BYTES = 64L * 1024
-    private val stamp = SimpleDateFormat("HH:mm:ss", Locale.US)
+    // 带日期：64KB 环形缓冲跨天复用后，单凭时分秒分不清记录是哪一天的（2026-09-26 黑屏事故日志因此无法辨认）
+    private val stamp = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US)
 
     private var file: File? = null
     private var handlerInstalled = false

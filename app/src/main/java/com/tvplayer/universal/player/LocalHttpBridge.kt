@@ -37,6 +37,11 @@ class LocalHttpBridge(
 
     val url: String get() = "http://127.0.0.1:${server.localPort}/stream"
 
+    /** 已发出的字节总数（所有连接累计），供看门狗判断数据是否还在流动 */
+    @Volatile
+    var bytesSentTotal = 0L
+        private set
+
     fun start() {
         thread(name = "http-bridge-accept", isDaemon = true) {
             while (running) {
@@ -118,6 +123,7 @@ class LocalHttpBridge(
                     }
                     out.write(buffer, 0, n)
                     pos += n
+                    bytesSentTotal += n
                 }
                 out.flush()
             } catch (e: Exception) {

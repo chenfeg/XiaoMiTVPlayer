@@ -16,6 +16,8 @@
     <string name="player_hw_fallback">硬解失败，已切换软解重试</string>
     <string name="player_error_io">数据读取中断（网络或文件读不动了），不是解码问题：换软解没用，先看网络/共享存储是否稳定</string>
     <string name="player_still_preparing">已等待 20 秒仍未就绪：还卡在读取/探测阶段，不是解码问题。设置页「运行日志」已记下源信息和原生日志</string>
+    <string name="player_recovering">检测到画面卡死，正在从断点自动恢复…</string>
+    <string name="player_need_reboot">解码器已卡死且无法自动恢复，请重启电视后再播放（重启不会影响其他内容）</string>
     <string name="player_error">播放出错：%1$s</string>
     <string name="player_failed">播放失败</string>
     <string name="player_error_soft_failed">硬解和软解都失败，见设置页运行日志的错误码</string>
@@ -30,6 +32,7 @@
     <string name="player_subtitle_fetch_failed">字幕下载出错：%1$s</string>
     <string name="player_audio_track">音轨 %1$d/%2$d</string>
     <string name="player_audio_single">这个文件只有一条音轨</string>
+    <string name="player_audio_querying">正在读取音轨信息…</string>
     <string name="player_speed">倍速 %1$s×</string>
     <string name="player_subtitle_off">字幕已关闭</string>
     <string name="player_paused">已暂停</string>
