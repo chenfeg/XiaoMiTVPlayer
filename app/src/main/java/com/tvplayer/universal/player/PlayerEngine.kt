@@ -151,8 +151,8 @@ class PlayerEngine {
         }
     }
 
-    fun seekTo(ms: Long) {
-        runCatching { player?.seekTo(ms.coerceIn(0, cachedDurationMs)) }
+    fun seekTo(ms: Long, durationMs: Long = cachedDurationMs) {
+        runCatching { player?.seekTo(ms.coerceIn(0, durationMs)) }
     }
 
     fun setSpeed(speed: Float) {
@@ -240,14 +240,19 @@ class PlayerEngine {
     }
 
     /**
-     * 存活看门狗专用：在 IO 线程限时释放。
-     * @return true = 已彻底释放（解码器已归还，可安全重建）；false = [timeoutMs] 内没释放完，
-     *         native 读/解码线程大概率已挂死、解码器被死持，此时**不能再重建**，应提示用户重启电视。
+     * 看门狗恢复专用：立刻摘掉 player 引用 + 标记停止，主线程从此刻起不再碰 native。
+     * 返回摘掉的实例，调用方负责后续释放（通常配合 [blockingReleaseExternal]）。
+     * 如果不摘引用，恢复等待期间用户按暂停键 → togglePause → native 调用 → 主线程冻死。
      */
-    suspend fun releaseWithTimeout(timeoutMs: Long): Boolean {
-        val p = player ?: return true
+    fun detach(): IjkMediaPlayer? {
+        val p = player
         player = null
         isPlayingState = false
+        return p
+    }
+
+    /** 释放外部持有的播放器实例（由 [detach] 返回）。只在 IO 线程调用。 */
+    suspend fun releaseDetached(p: IjkMediaPlayer, timeoutMs: Long): Boolean {
         val done = withTimeoutOrNull(timeoutMs) {
             withContext(Dispatchers.IO) { blockingRelease(p) }
         }
@@ -256,6 +261,16 @@ class PlayerEngine {
             return false
         }
         return true
+    }
+
+    /**
+     * 存活看门狗专用：在 IO 线程限时释放。
+     * @return true = 已彻底释放（解码器已归还，可安全重建）；false = [timeoutMs] 内没释放完，
+     *         native 读/解码线程大概率已挂死、解码器被死持，此时**不能再重建**，应提示用户重启电视。
+     */
+    suspend fun releaseWithTimeout(timeoutMs: Long): Boolean {
+        val p = detach() ?: return true
+        return releaseDetached(p, timeoutMs)
     }
 
     /**

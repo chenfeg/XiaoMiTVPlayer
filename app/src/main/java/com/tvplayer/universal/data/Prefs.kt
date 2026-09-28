@@ -64,19 +64,19 @@ class Prefs(context: Context) {
         set(v) = sp.edit().putInt("subtitle_delay_ms", v).apply()
 
     var smbHost: String
-        get() = sp.getString("smb_host", "") ?: ""
+        get() = sp.getString("smb_host", BuildConfig.SMB_HOST) ?: BuildConfig.SMB_HOST
         set(v) = sp.edit().putString("smb_host", v).apply()
 
     var smbShare: String
-        get() = sp.getString("smb_share", "") ?: ""
+        get() = sp.getString("smb_share", BuildConfig.SMB_SHARE) ?: BuildConfig.SMB_SHARE
         set(v) = sp.edit().putString("smb_share", v).apply()
 
     var smbUser: String
-        get() = sp.getString("smb_user", "") ?: ""
+        get() = sp.getString("smb_user", BuildConfig.SMB_USER) ?: BuildConfig.SMB_USER
         set(v) = sp.edit().putString("smb_user", v).apply()
 
     var smbPass: String
-        get() = sp.getString("smb_pass", "") ?: ""
+        get() = sp.getString("smb_pass", BuildConfig.SMB_PASS) ?: BuildConfig.SMB_PASS
         set(v) = sp.edit().putString("smb_pass", v).apply()
 
     /** 字幕缓存总量上限（MB），保护 eMMC */

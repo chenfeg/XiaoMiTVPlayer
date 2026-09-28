@@ -17,6 +17,10 @@ if (localPropsFile.exists()) {
 }
 val assrtToken: String = localProps.getProperty("ASSRT_TOKEN", "")
 val opensubKey: String = localProps.getProperty("OPENSUB_KEY", "")
+val smbHost: String = localProps.getProperty("SMB_HOST", "")
+val smbShare: String = localProps.getProperty("SMB_SHARE", "")
+val smbUser: String = localProps.getProperty("SMB_USER", "")
+val smbPass: String = localProps.getProperty("SMB_PASS", "")
 
 android {
     namespace = "com.tvplayer.universal"
@@ -102,6 +106,10 @@ android {
     defaultConfig {
         buildConfigField("String", "ASSRT_TOKEN", "\"$assrtToken\"")
         buildConfigField("String", "OPENSUB_KEY", "\"$opensubKey\"")
+        buildConfigField("String", "SMB_HOST", "\"$smbHost\"")
+        buildConfigField("String", "SMB_SHARE", "\"$smbShare\"")
+        buildConfigField("String", "SMB_USER", "\"$smbUser\"")
+        buildConfigField("String", "SMB_PASS", "\"$smbPass\"")
     }
 }
 

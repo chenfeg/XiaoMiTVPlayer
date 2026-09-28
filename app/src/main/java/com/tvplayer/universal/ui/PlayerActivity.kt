@@ -1,5 +1,9 @@
 package com.tvplayer.universal.ui
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -63,6 +67,36 @@ class PlayerActivity : AppCompatActivity() {
 
     /** 标记 onPause 是否由手动休眠触发（区别于用户主动退出），onResume 据此恢复 */
     @Volatile private var pausedBySleep = false
+    /** 上次 onResume 时刻（elapsedRealtime），onPause 据此识别唤醒抖动 */
+    @Volatile private var lastResumeAt = 0L
+    /** 读取中断（ioError）已重试次数，独立于卡死配额：网络未就绪不该占用解码器卡死次数 */
+    @Volatile private var ioRetries = 0
+    /**
+     * 唤醒事件 epoch：每次真正睡眠（onPause 非抖动分支）递增。
+     * 唤醒后 onResume 和 SCREEN_ON 广播都会触发 triggerRecovery(fromSleep=true)，
+     * 用 epoch 让后到的入口跳过：实测日志 10:45:09 onResume 触发恢复（位置 2548s）后，
+     * 10:45:18 SCREEN_ON 广播又触发一次（位置 0s，因 detach 后 cachedPosition=0），
+     * 把第一次恢复的 2548s 覆盖成 0s，用户看到从头播放。
+     */
+    @Volatile private var wakeEpoch = 0
+    @Volatile private var processedWakeEpoch = -1
+
+    /**
+     * 休眠唤醒检测：小米电视 30 分钟休眠不走 onPause/onResume 生命周期（Activity 一直在前台，
+     * 系统只挂起网络和 CPU），FLAG_KEEP_SCREEN_ON 保住了画面但 SMB 连接已死。
+     * ACTION_SCREEN_ON 在电视从休眠唤醒时触发，此时必须重建播放管线。
+     * 不在 ACTION_SCREEN_OFF 时释放资源：系统会自然挂起线程，提前释放反而可能影响系统稳定性。
+     */
+    private val sleepReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != Intent.ACTION_SCREEN_ON) return
+            if (destroyed || !started) return
+            // 不在此处打"从 Xs 断点恢复"：detach 后 cachedPosition=0 会误导。
+            // triggerRecovery 内部会根据 wakeEpoch 决定是否真触发，并打对应日志。
+            EventLog.line("屏幕唤醒广播到达")
+            triggerRecovery(engine.cachedPosition, fromSleep = true)
+        }
+    }
 
     /** 播放存活看门狗：监测"应当播放却长时间没有帧推进"的卡死，触发自动恢复 */
     private var livenessJob: Job? = null
@@ -148,6 +182,7 @@ class PlayerActivity : AppCompatActivity() {
         // 导致 ijk 读线程永久阻塞、mediacodec 死持、整机冻结（2026-09-27 事故根因）。
         // FLAG_KEEP_SCREEN_ON 只防自动休眠，用户按电源键仍可正常关屏。
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        registerReceiver(sleepReceiver, IntentFilter(Intent.ACTION_SCREEN_ON))
         prefs = Prefs(this)
 
         osd = OsdController(
@@ -221,9 +256,10 @@ class PlayerActivity : AppCompatActivity() {
                 surfaceReady = true
                 if (started && !destroyed) {
                     // 休眠唤醒：surface 重建，但旧引擎的 SMB 连接已死，必须整链重建
-                    EventLog.line("surface 重建（休眠唤醒），从 ${engine.cachedPosition / 1000}s 断点恢复")
-                    val pos = engine.cachedPosition
-                    lifecycleScope.launch { recoverFromStall(pos) }
+                    // 不在此处打"从 Xs 断点恢复"：detach 后 cachedPosition=0 会误导，
+                    // triggerRecovery 内部根据 wakeEpoch 决定是否真触发并打对应日志。
+                    EventLog.line("surface 重建（休眠唤醒）")
+                    triggerRecovery(engine.cachedPosition, fromSleep = true)
                 } else {
                     maybeStart()
                 }
@@ -250,7 +286,8 @@ class PlayerActivity : AppCompatActivity() {
                 val resume = resumeAtMs
                 if (resume > 0) {
                     resumeAtMs = -1L
-                    engine.seekTo(resume)
+                    // 用 onPrepared 的真实时长，不用 cachedDurationMs（恢复重建后它还是 0）
+                    engine.seekTo(resume, durationMs)
                 }
                 subtitles.autoLoad()
                 checkAudioPath()
@@ -295,10 +332,15 @@ class PlayerActivity : AppCompatActivity() {
             return
         }
         if (ioError) {
-            // SMB 网络断流：位置还在，尝试从断点重建数据源恢复播放
-            val pos = engine.cachedPosition
+            // SMB 网络断流：位置还在，尝试从断点重建数据源恢复播放。
+            // 走 ioError 分支：不消耗 autoRecovered（解码器卡死配额），用独立 ioRetries。
+            // 唤醒后 SMB ENETUNREACH 触发的 onError 循环不会撞 MAX_AUTO_RECOVER 误报"解码器已卡死"。
+            // prepare 阶段就 onError 时 cachedPosition=0（新 player 还没开始播），
+            // 但 onPrepared 还没把 resumeAtMs 清掉——它是 recoverFromStall 设置的断点。
+            // 取 max(cachedPosition, resumeAtMs) 保留断点，避免唤醒后 ioError 把 2498s 退到 0s。
+            val pos = maxOf(engine.cachedPosition, resumeAtMs)
             EventLog.line("读取中断，尝试从 ${pos / 1000}s 断点自动恢复 $detail")
-            lifecycleScope.launch { recoverFromStall(pos) }
+            triggerRecovery(pos, isIoError = true)
             return
         }
         val size = engine.videoSize()
@@ -446,7 +488,11 @@ class PlayerActivity : AppCompatActivity() {
                     if (frozenSince == 0L) frozenSince = now
                     if (now - frozenSince >= STALL_LIMIT_MS) {
                         frozenSince = 0L; lastPos = -1L; lastBytes = -1L
-                        recoverFromStall(pos)
+                        // 走统一入口 triggerRecovery：立即占用 recovering=true，
+                        // 否则看门狗绕过检查直接调 recoverFromStall，与同秒触发的 onPause
+                        // 或 onError 的 triggerRecovery 并发（实测日志 10:22:00 同时打出
+                        // "进入休眠"和"检测到播放卡死"两行）。
+                        triggerRecovery(pos)
                     }
                 }
             }
@@ -454,42 +500,145 @@ class PlayerActivity : AppCompatActivity() {
     }
 
     /**
-     * 卡死恢复：关数据源 → 限时释放旧引擎 → 从断点重建。
-     * release 超时（解码器线程挂死）则不再重建，常驻提示用户重启电视——
-     * 那时硬解已被死持，再开播放器也播不了，只能重启 mediaserver。
+     * 统一恢复入口：防并发 + 记日志 + 启动恢复协程。
+     * 三个触发点（onResume / wakeReceiver / surfaceCreated）都走这里，onError 的 ioError 分支也走这里。
+     * 立刻占用 recovering=true：原 check-then-launch 之间存在竞态——主线程检查 recovering=false
+     * 后 launch 协程，协程尚未执行 recoverFromStall 的第一行（设 recovering=true），主线程就被
+     * 下一个 onError/看门狗触发，又通过检查又 launch 一个协程。同一秒内可并发多个恢复
+     * （实测日志 10:22:39 一秒内多次"从 0s 断点自动恢复播放"）。
      */
-    private suspend fun recoverFromStall(positionMs: Long) {
+    private fun triggerRecovery(positionMs: Long, fromSleep: Boolean = false, isIoError: Boolean = false) {
+        if (recovering || destroyed) return
+        // 同一唤醒事件防重复：onResume 和 SCREEN_ON 广播都会触发 fromSleep=true 恢复，
+        // 后到的入口看 processedWakeEpoch==wakeEpoch 跳过，避免把第一次恢复的位置覆盖成 0
+        // （detach 后 cachedPosition=0）。实测 SCREEN_ON 在 onResume 之后约 9 秒到达。
+        if (fromSleep) {
+            if (processedWakeEpoch == wakeEpoch) {
+                EventLog.line("本次唤醒已恢复过（epoch=$wakeEpoch），跳过重复触发 位置=${positionMs / 1000}s")
+                return
+            }
+            processedWakeEpoch = wakeEpoch
+        }
+        recovering = true
+        EventLog.line("触发恢复 位置=${positionMs / 1000}s 休眠=$fromSleep io=$isIoError")
+        lifecycleScope.launch { recoverFromStall(positionMs, fromSleep, isIoError) }
+    }
+
+    /**
+     * 休眠前主动释放：只关数据源 + 限时 release，不重建、不计入 autoRecovered。
+     * 重建交给唤醒入口（onResume / wakeReceiver / surfaceCreated）的 triggerRecovery。
+     * 为什么不复用 recoverFromStall：它 release 完会立刻 openEngine 在睡前新建播放器，
+     * prepareAsync 被 sleep 打断正是 MStar OMX 半初始化挂死的温床；而且 fromSleep=false
+     * 会误把这次释放计入 autoRecovered，连累唤醒后看门狗很快撞到 MAX_AUTO_RECOVER。
+     * 竞态：唤醒若发生在 release 期间（recovering=true 挡掉了那三个入口的 triggerRecovery），
+     * release 完成后用 pausedBySleep=false 检测已唤醒，补触发一次恢复。
+     */
+    private suspend fun releaseForSleep() {
         if (recovering || destroyed) return
         recovering = true
-        EventLog.line("检测到播放卡死：位置 ${positionMs / 1000}s 连续 ${STALL_LIMIT_MS / 1000}s 无推进")
-        osdHandler.post { showOsdPermanent(getString(R.string.player_recovering)) }
-        // 先掐数据源：断掉桥的 socket 和 SMB 读，让旧引擎的读线程能醒
+        EventLog.line("进入休眠，主动释放引擎 位置=${engine.cachedPosition / 1000}s")
+        val oldPlayer = engine.detach()
         bridge?.close()
         bridge = null
-        val released = engine.releaseWithTimeout(RELEASE_TIMEOUT_MS)
+        if (oldPlayer != null) {
+            val released = engine.releaseDetached(oldPlayer, RELEASE_TIMEOUT_MS)
+            if (!released) {
+                EventLog.line("休眠前 release 超时：解码器线程可能已挂死，唤醒后或需重启电视")
+            }
+        }
+        val pendingWake = !pausedBySleep && !destroyed
+        recovering = false
+        if (pendingWake) {
+            EventLog.line("唤醒发生在释放期间，补触发恢复")
+            triggerRecovery(engine.cachedPosition, fromSleep = true)
+        }
+    }
+
+    /**
+     * 卡死/中断恢复：关数据源 → 限时释放旧引擎 → 从断点重建。
+     * release 超时（解码器线程挂死）则不再重建，常驻提示用户重启电视——
+     * 那时硬解已被死持，再开播放器也播不了，只能重启 mediaserver。
+     * 网络未就绪（ENETUNREACH）时在内部重试，直到 SMB 能连上或界面销毁。
+     * 三种来源分开计数：
+     * - sleep：休眠唤醒，系统行为，重置 autoRecovered/ioRetries；
+     * - ioError：读取中断（SMB 断流/网络未就绪），走独立 ioRetries 配额，
+     *   不消耗解码器卡死配额——唤醒后 SMB ENETUNREACH 触发的 onError 循环
+     *   2 次就撞到 MAX_AUTO_RECOVER 显示"解码器已卡死"，但那根本不是解码器卡死；
+     * - stall：真正的位置停滞，走 autoRecovered。
+     */
+    private suspend fun recoverFromStall(positionMs: Long, fromSleep: Boolean = false, isIoError: Boolean = false) {
+        if (destroyed) { recovering = false; return }
+        // recovering 已由 triggerRecovery 占用
+        val reason = when {
+            fromSleep -> "休眠唤醒"
+            isIoError -> "读取中断：位置 ${positionMs / 1000}s 数据源断流"
+            else -> "检测到播放卡死：位置 ${positionMs / 1000}s 连续 ${STALL_LIMIT_MS / 1000}s 无推进"
+        }
+        EventLog.line(reason)
+        osdHandler.post { showOsdPermanent(getString(R.string.player_recovering)) }
+        // 先掐数据源：断掉桥的 socket 和 SMB 读，让旧引擎的读线程能醒
+        // 摘引用必须在关桥之前：detach 之后 player=null、isPlayingState=false，
+        // 主线程的 togglePause/seekTo 立刻变成 no-op，不会在关桥的等待中碰 native。
+        val oldPlayer = engine.detach()
+        bridge?.close()
+        bridge = null
+        val released = if (oldPlayer != null) {
+            engine.releaseDetached(oldPlayer, RELEASE_TIMEOUT_MS)
+        } else true
         if (!released) {
-            EventLog.line("卡死恢复失败：解码器未释放，需重启电视")
-            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
-            recovering = false
-            return
+            // 释放超时：解码器线程阻塞，但仍在后台释放。继续重建，旧的播放器最终会释放完毕。
+            // 如果新的播放器无法打开（资源被占用），会走到 onError 再次恢复。
+            EventLog.line("卡死恢复：解码器释放超时，继续重建（旧播放器在后台释放）")
         }
-        if (autoRecovered >= MAX_AUTO_RECOVER) {
-            EventLog.line("已自动恢复 $autoRecovered 次仍卡死，不再重试")
-            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
-            recovering = false
-            return
+        // 计数与上限：sleep 重置两项计数；ioError 走 ioRetries（独立配额）；
+        // 真正的卡死走 autoRecovered，到 MAX_AUTO_RECOVER 停。
+        when {
+            fromSleep -> {
+                autoRecovered = 0
+                ioRetries = 0
+            }
+            isIoError -> {
+                if (ioRetries >= MAX_IO_RETRIES) {
+                    EventLog.line("网络已连续重试 $ioRetries 次仍读取中断，不再重试")
+                    osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+                    recovering = false
+                    return
+                }
+                ioRetries++
+            }
+            else -> {
+                if (autoRecovered >= MAX_AUTO_RECOVER) {
+                    EventLog.line("已自动恢复 $autoRecovered 次仍卡死，不再重试")
+                    osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+                    recovering = false
+                    return
+                }
+                autoRecovered++
+            }
         }
-        autoRecovered++
-        // 重建数据源（SMB 重新挂桥；本地文件直接用路径）
-        val newUrl = runCatching { resolveUrl() }.getOrElse {
-            EventLog.line("卡死恢复重建数据源失败 ${it.javaClass.simpleName}")
-            osdHandler.post { showOsdPermanent(getString(R.string.player_need_reboot)) }
+        // 网络未就绪时重试：唤醒后系统网络栈需要几秒才能恢复，ENETUNREACH 是常态
+        var newUrl: String? = null
+        var retry = 0
+        while (newUrl == null && !destroyed) {
+            retry++
+            newUrl = runCatching { resolveUrl() }.getOrElse {
+                EventLog.line("重建数据源失败（第 ${retry} 次）${it.javaClass.simpleName}，5 秒后重试…")
+                null
+            }
+            if (newUrl == null) delay(5000)
+        }
+        if (newUrl == null || destroyed) {
+            EventLog.line("界面已销毁，放弃恢复")
             recovering = false
             return
         }
         resumeAtMs = positionMs
         playbackUrl = newUrl
-        EventLog.line("从 ${positionMs / 1000}s 断点自动恢复播放（第 $autoRecovered 次）")
+        when {
+            fromSleep -> EventLog.line("从 ${positionMs / 1000}s 断点恢复播放（休眠唤醒，重试 $retry 次）")
+            isIoError -> EventLog.line("从 ${positionMs / 1000}s 断点恢复播放（io 中断第 $ioRetries 次，重试 $retry 次）")
+            else -> EventLog.line("从 ${positionMs / 1000}s 断点自动恢复播放（第 $autoRecovered 次，重试 $retry 次）")
+        }
         osdHandler.post { openEngine(newUrl, hw = engine.hardwareDecode) }
         recovering = false
     }
@@ -684,24 +833,43 @@ class PlayerActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         pausedBySleep = true
-        // 用缓存状态判断，不读 native
-        if (engine.isPlayingState) engine.togglePause()
+        // 唤醒抖动检测：电视唤醒过程中电源对话框/解锁界面反复覆盖 Activity，
+        // onPause/onResume 会在同一秒内交替触发（实测 10:22:37 一秒内 onPause→onResume→onPause）。
+        // 这种抖动期反复 release/openEngine 会与系统对话框叠加，把 OMX 卡在半初始化状态。
+        // 真正的用户主动睡眠距上次 onResume 通常 >2.5s，抖动期间跳过释放。
+        val sinceResume = SystemClock.elapsedRealtime() - lastResumeAt
+        if (sinceResume < RESUME_JITTER_MS) {
+            EventLog.line("onPause 距 onResume 仅 ${sinceResume}ms，判定为唤醒抖动，跳过释放")
+            return
+        }
+        // 真正睡眠：递增 wakeEpoch，唤醒后第一个 triggerRecovery(fromSleep=true) 处理，
+        // 后到的入口（SCREEN_ON 广播/surfaceCreated）看 processedWakeEpoch==wakeEpoch 跳过，
+        // 避免把第一次恢复的位置覆盖成 0（detach 后 cachedPosition=0）。
+        wakeEpoch++
+        // 预防策略：休眠前主动干净释放引擎，不给 MStar OMX 饿死挂死的机会。
+        // 实测：暂停不能阻止解码线程饿死挂死（ffmpeg 3.4 timeout 对已建立的 TCP 无效，
+        // read() 永久阻塞），挂死后 release 5s 收不回，整机废掉必须重启。
+        // 只释放不重建：重建交给唤醒入口（onResume/wakeReceiver/surfaceCreated）的 triggerRecovery，
+        // 否则 release 完立刻 openEngine 会在睡前新建播放器，prepareAsync 被 sleep 打断正是
+        // OMX 半初始化挂死的温床；且 fromSleep=false 会误把这次释放计入 autoRecovered。
+        if (started && !destroyed && !recovering) {
+            lifecycleScope.launch { releaseForSleep() }
+        }
     }
 
     override fun onResume() {
         super.onResume()
-        if (!pausedBySleep || destroyed || !started) return
+        lastResumeAt = SystemClock.elapsedRealtime()
+        if (destroyed || !started) return
         pausedBySleep = false
-        // 手动休眠唤醒：surface 可能没重建，但 SMB 连接已被系统挂起，
-        // 旧引擎的读线程已死，必须整链重建才能恢复画面。
-        EventLog.line("休眠唤醒，从 ${engine.cachedPosition / 1000}s 断点恢复")
-        val pos = engine.cachedPosition
-        lifecycleScope.launch { recoverFromStall(pos) }
+        // 统一走 triggerRecovery：recovering 标志防并发，网络重试在 recoverFromStall 内部处理
+        triggerRecovery(engine.cachedPosition, fromSleep = true)
     }
 
     override fun onDestroy() {
         EventLog.line("退出播放 位置=${engine.cachedPosition / 1000}s")
         destroyed = true
+        runCatching { unregisterReceiver(sleepReceiver) }
         tickJob?.cancel()
         livenessJob?.cancel()
         // 排队的重试/体检/自动隐藏全部撤掉：留在那儿的就是"退出之后还去开第二台播放器"的入口
@@ -734,14 +902,28 @@ class PlayerActivity : AppCompatActivity() {
         /** 存活看门狗："应当播放却连续多久无位置推进"判定为卡死 */
         private const val STALL_LIMIT_MS = 10_000L
 
-        /** 卡死恢复时等待旧引擎 release 的上限；超时说明解码器挂死，只能重启电视 */
-        private const val RELEASE_TIMEOUT_MS = 5_000L
+        /** 卡死恢复时等待旧引擎 release 的上限；超时说明解码器线程阻塞，但仍在后台释放 */
+        private const val RELEASE_TIMEOUT_MS = 10_000L
 
         /** 用户 seek 后给看门狗的豁免时长（覆盖提交400ms+落定上限15s） */
         private const val SEEK_GRACE_MS = 16_000L
 
         /** 一次播放内最多自动恢复次数，超过则提示重启，避免无限重建 */
         private const val MAX_AUTO_RECOVER = 2
+
+        /**
+         * 网络读取中断（SMB 断流/ENETUNREACH）的独立重试上限，与解码器卡死分开计数：
+         * 唤醒后系统网络栈未就绪期间触发的 onError 循环不该占用解码器卡死配额。
+         * 6 次 × 5 秒 ≈ 30 秒，足以覆盖电视从深度睡眠唤醒后网络栈恢复时间。
+         */
+        private const val MAX_IO_RETRIES = 6
+
+        /**
+         * onResume 后多少毫秒内的 onPause 视为唤醒抖动（电源对话框/解锁界面反复覆盖 Activity）。
+         * 实测日志 10:22:37 onPause→onResume→onPause 在同一秒内交替，跳过释放避免反复重建引擎。
+         * 用户主动按电源键睡眠距上次 onResume 通常远超此阈值。
+         */
+        private const val RESUME_JITTER_MS = 2500L
 
         /** 屏幕上的快进/快退按钮一次跳多少 */
         private const val SKIP_MS = 10_000L
